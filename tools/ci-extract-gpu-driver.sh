@@ -28,7 +28,7 @@ SEVEN_SHA=22cf82fcc6eb7474f1d5bb4f02c0f8ebd573a718089d6833dc30f8350a3b232e
 export WORK OUT PREFIX VPHONE CLI QEMU_REF USBMUXD_REF CLOUD_SHA CLOUD_URL SWIFT_URL SWIFT_SHA SEVEN_URL SEVEN_SHA
 export DEBIAN_FRONTEND=noninteractive
 export http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= all_proxy= NO_PROXY='*'
-qemu_pid= mux_pid= exporter_pid= attacher_pid= restore_pid= guard_pid=
+qemu_pid= mux_pid= exporter_pid= attacher_pid= restore_pid= restore_log_pid= guard_pid=
 ROOT="$WORK/vphone-linux"
 VM="$ROOT/vms/gpu-recovery"
 SOCK="$WORK/qmp.sock"
@@ -77,7 +77,7 @@ stop_vm() {
 cleanup() {
     local rc=$?
     trap - EXIT INT TERM
-    for pid in "$guard_pid" "$restore_pid" "$attacher_pid" "$exporter_pid" "$mux_pid"; do
+    for pid in "$guard_pid" "$restore_log_pid" "$restore_pid" "$attacher_pid" "$exporter_pid" "$mux_pid"; do
         [[ -z "$pid" ]] || kill -TERM "$pid" 2>/dev/null || true
     done
     stop_vm || rc=1
@@ -94,8 +94,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
+stage() { printf '\n[%s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 fetch() { curl --noproxy '*' -fL --retry 3 --connect-timeout 30 -C - "$1" -o "$2"; echo "$3  $2" | sha256sum -c -; }
 clone() {
+    stage "Fetch pinned source: $1 ($2)"
     git init -q "$3"
     git -C "$3" remote add origin "$1"
     git -C "$3" -c http.proxy= -c http.version=HTTP/1.1 fetch -q --depth 1 origin "$2"
@@ -111,14 +113,19 @@ check_resources() {
 }
 
 # These are fixed preinstalled SDK directories on the disposable hosted VM.
+stage 'Free space on the disposable runner and install build dependencies'
 rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache
-apt-get update -qq
-apt-get install -y --no-install-recommends build-essential clang cmake ninja-build pkg-config autoconf automake libtool git curl xz-utils unzip python3-venv libglib2.0-dev libpixman-1-dev libfdt-dev libusb-1.0-0-dev libusbmuxd-dev libarchive-dev libssl-dev libcurl4-openssl-dev zlib1g-dev libbz2-dev liblzma-dev libxml2-dev libicu-dev libblocksruntime-dev libncurses-dev libedit-dev libsqlite3-dev linux-tools-generic > "$LOG/apt.log" 2>&1
+apt-get update -qq 2>&1 | tee "$LOG/apt.log"
+apt-get install -y --no-install-recommends build-essential clang cmake ninja-build pkg-config autoconf automake libtool git curl xz-utils unzip python3-venv libglib2.0-dev libpixman-1-dev libfdt-dev libusb-1.0-0-dev libusbmuxd-dev libarchive-dev libssl-dev libcurl4-openssl-dev zlib1g-dev libbz2-dev liblzma-dev libxml2-dev libicu-dev libblocksruntime-dev libncurses-dev libedit-dev libsqlite3-dev linux-tools-generic 2>&1 | tee -a "$LOG/apt.log"
+stage 'Check USB/IP kernel modules'
 if ! modprobe usbip_core || ! modprobe vhci_hcd; then
-    apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" >> "$LOG/apt.log" 2>&1
+    stage "Install missing USB/IP modules for kernel $(uname -r)"
+    apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" 2>&1 | tee -a "$LOG/apt.log"
     modprobe usbip_core
     modprobe vhci_hcd
 fi
+lsmod | awk 'NR==1 || $1 ~ /^(usbip_core|vhci_hcd)$/' | tee "$LOG/modules.log"
+stage 'USB/IP modules loaded successfully'
 USBIP=$(find -L /usr/lib/linux-tools -maxdepth 2 -name usbip -type f -executable | sort -V | tail -1)
 [[ -n "$USBIP" ]]
 mkdir -p "$PREFIX/bin"
@@ -133,28 +140,33 @@ git -C "$ROOT" submodule update --init qemu
 [[ $(git -C "$ROOT/qemu" rev-parse HEAD) == "$QEMU_REF" ]]
 git -C "$ROOT/qemu" submodule update --init util/mlib
 
+stage 'Download and unpack the pinned Swift toolchain'
 fetch "$SWIFT_URL" "$WORK/swift.tar.gz" "$SWIFT_SHA"
 mkdir "$WORK/swift"
 tar -xzf "$WORK/swift.tar.gz" -C "$WORK/swift" --strip-components=1
 export PATH="$WORK/swift/usr/bin:$PATH"
+stage 'Install pinned Meson'
 python3 -m venv "$WORK/python"
-"$WORK/python/bin/pip" install meson==1.9.1 > "$LOG/meson.log" 2>&1
+"$WORK/python/bin/pip" install meson==1.9.1 2>&1 | tee "$LOG/meson.log"
 export PATH="$WORK/python/bin:$PATH"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
 export LD_LIBRARY_PATH="$PREFIX/lib:$WORK/swift/usr/lib/swift/linux"
 export C_INCLUDE_PATH="$PREFIX/include" LIBRARY_PATH="$PREFIX/lib"
 
 clone https://github.com/lzfse/lzfse.git e634ca58b4821d9f3d560cdc6df5dec02ffc93fd "$WORK/lzfse"
-cmake -S "$WORK/lzfse" -B "$WORK/lzfse-build" -G Ninja -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX="$PREFIX" > "$LOG/lzfse.log" 2>&1
-cmake --build "$WORK/lzfse-build" -j2 >> "$LOG/lzfse.log" 2>&1
-cmake --install "$WORK/lzfse-build" >> "$LOG/lzfse.log" 2>&1
+stage 'Build and install LZFSE'
+cmake -S "$WORK/lzfse" -B "$WORK/lzfse-build" -G Ninja -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX="$PREFIX" 2>&1 | tee "$LOG/lzfse.log"
+cmake --build "$WORK/lzfse-build" -j2 2>&1 | tee -a "$LOG/lzfse.log"
+cmake --install "$WORK/lzfse-build" 2>&1 | tee -a "$LOG/lzfse.log"
 for spec in libplist:fe3dc34dc3484006e12b403f7ceb06f0ad40b6f4 libimobiledevice-glue:10ddafa16458a012bcbd3e83a6ab36a032dc84d8 libtatsu:e7d6ad13ef928aa609d0ccdfc586f7d6e8e049bf libimobiledevice:fa0f79190142bc309307967c058f89c1b36eb6b8; do
     name=$(echo "$spec" | cut -d: -f1); ref=$(echo "$spec" | cut -d: -f2)
     clone "https://github.com/libimobiledevice/$name.git" "$ref" "$WORK/$name"
-    (cd "$WORK/$name"; ./autogen.sh --prefix="$PREFIX" --without-cython; make -j2; make install) > "$LOG/$name.log" 2>&1
+    stage "Build and install $name"
+    (cd "$WORK/$name"; ./autogen.sh --prefix="$PREFIX" --without-cython; make -j2; make install) 2>&1 | tee "$LOG/$name.log"
 done
 
 # Reproducible Linux-only changes are inserted below, never the Windows port.
+stage 'Apply checked Linux source changes'
 python3 - "$ROOT" <<'PY'
 import pathlib,sys
 r=pathlib.Path(sys.argv[1]); q=r/'qemu'
@@ -191,15 +203,18 @@ p.write_text('/* vphone-linux: restore boot-args plus VPHONE_RESTORE_BOOT_ARGS_E
 replace(r/'linux-create/edits/MobileRestoreCore.txt', "# Scale idevicerestore's device-event waits for emulation (Core/vphone_linux_timeout.h).\n", "Recovery/recovery.c\ts/recovery_error = irecv_send_command\\(client->recovery->client, setba\\);/recovery_error = vphone_linux_set_boot_args(client->recovery->client, setba, client->restore_boot_args);\\n\\t\\tif (recovery_error != IRECV_E_SUCCESS) {\\n\\t\\t\\treturn -1;\\n\\t\\t}/\n# Scale idevicerestore's device-event waits for emulation (Core/vphone_linux_timeout.h).\n")
 PY
 mkdir "$WORK/qemu-build"
-(cd "$WORK/qemu-build"; "$ROOT/qemu/configure" --python="$WORK/python/bin/python" --target-list=aarch64-softmmu --with-devices-aarch64=vphone --without-default-devices --without-default-features --enable-tcg --enable-lzfse --enable-pixman --enable-fdt=system --disable-pvg --disable-tools --disable-werror; ninja -j2 qemu-system-aarch64) > "$LOG/qemu-build.log" 2>&1
+stage 'Configure and build CPU-only QEMU'
+(cd "$WORK/qemu-build"; "$ROOT/qemu/configure" --python="$WORK/python/bin/python" --target-list=aarch64-softmmu --with-devices-aarch64=vphone --without-default-devices --without-default-features --enable-tcg --enable-lzfse --enable-pixman --enable-fdt=system --disable-pvg --disable-tools --disable-werror; ninja -j2 qemu-system-aarch64) 2>&1 | tee "$LOG/qemu-build.log"
 cp "$WORK/qemu-build/qemu-system-aarch64" "$PREFIX/bin/"
 export QEMU="$PREFIX/bin/qemu-system-aarch64"
 cp "$GITHUB_WORKSPACE/tools/Package.resolved" "$ROOT/linux-create/Package.resolved"
-(cd "$ROOT/linux-create"; VPHONE_CLI="$WORK/vphone-cli" bash sync-sources.sh; rm Shims/libarchive/lib/libarchive.so; ln -s /usr/lib/x86_64-linux-gnu/libarchive.so.13 Shims/libarchive/lib/libarchive.so; swift build -c release -j2 --force-resolved-versions --build-system swiftbuild --scratch-path .build/out -Xcc "-I$PREFIX/include" -Xlinker "-L$PREFIX/lib") > "$LOG/swift-build.log" 2>&1
+stage 'Build the pinned Linux firmware CLI with Swift'
+(cd "$ROOT/linux-create"; VPHONE_CLI="$WORK/vphone-cli" bash sync-sources.sh; rm Shims/libarchive/lib/libarchive.so; ln -s /usr/lib/x86_64-linux-gnu/libarchive.so.13 Shims/libarchive/lib/libarchive.so; swift build -c release -j2 --force-resolved-versions --build-system swiftbuild --scratch-path .build/out -Xcc "-I$PREFIX/include" -Xlinker "-L$PREFIX/lib") 2>&1 | tee "$LOG/swift-build.log"
 cp "$ROOT/linux-create/.build/out/out/Products/Release-linux-x86_64/vphone-cli" "$PREFIX/bin/"
 VC="$PREFIX/bin/vphone-cli"
 clone https://github.com/libimobiledevice/usbmuxd.git "$USBMUXD_REF" "$ROOT/.build/usbmuxd-32k/src"
-(cd "$ROOT"; bash tools/build-usbmuxd-32k.sh) > "$LOG/usbmuxd-build.log" 2>&1
+stage 'Build usbmuxd with the 32 KiB USB MTU'
+(cd "$ROOT"; bash tools/build-usbmuxd-32k.sh) 2>&1 | tee "$LOG/usbmuxd-build.log"
 mkdir "$WORK/7zip"
 fetch "$SEVEN_URL" "$WORK/7zip.tar.xz" "$SEVEN_SHA"
 tar -xJf "$WORK/7zip.tar.xz" -C "$WORK/7zip" 7zz
@@ -208,6 +223,7 @@ cp "$WORK/vphone-cli/VPhoneExecutable/VPhoneVirtualization/Resources/OpenAVB/Ope
 cp "$WORK/vphone-cli/VPhoneExecutable/VPhoneVirtualization/Resources/OpenSEP/OpenSEP.bin" "$ROOT/OpenSEP/"
 echo "bbcabe73fd39fb92b96fbb4c661c1a15b0f9e5d9411468f7954c4f433911cb9c  $ROOT/OpenAVB/OpenAVB.bin" | sha256sum -c -
 echo "92690b9c7e900ec0054271dbbc0444ee2d8567c8d41d3a2e491ba011e2b08b12  $ROOT/OpenSEP/OpenSEP.bin" | sha256sum -c -
+stage 'Download the pinned cloudOS IPSW and prepare a fresh 4 GiB VM'
 fetch "$CLOUD_URL" "$WORK/cloudOS.ipsw" "$CLOUD_SHA"
 (cd "$ROOT"; MEM_GIB=4 CPUS=8 bash tools/new-vm.sh vms/gpu-recovery)
 unzip -q "$WORK/cloudOS.ipsw" -d "$VM/iPhonePCC_Restore"
@@ -220,6 +236,7 @@ if 'iPhone99,11' not in t: m['SupportedProductTypes']=t+['iPhone99,11']; plistli
 PY
 rm -rf -- "$WORK/qemu-build" "$ROOT/linux-create/.build" "$WORK/swift.tar.gz"
 check_resources
+stage 'Start the temporary cloudOS VM and USB helpers'
 systemctl stop usbmuxd.service 2>/dev/null || true
 [[ ! -e /var/run/usbmuxd ]]
 "$ROOT/.build/usbmuxd-32k/usbmuxd" -f -v -S /var/run/usbmuxd -P "$WORK/usbmuxd.pid" -l "$LOG/usbmuxd.log" & mux_pid=$!
@@ -249,16 +266,21 @@ VUSB_URB_TIMEOUT=300 python3 -u tools/vusb-usbip.py "$WORK/vusb.sock" > "$LOG/us
 bash tools/usbip-autoattach.sh > "$LOG/attach.log" 2>&1 & attacher_pid=$!
 for _ in $(seq 1 60); do "$VC" recovery-probe > "$LOG/probe.log" 2>&1 && break; sleep 3; done
 "$VC" recovery-probe >> "$LOG/probe.log" 2>&1
+stage 'Restore stock cloudOS (up to 65 minutes; streaming restore.log)'
 VPHONE_RESTORE_TIMEOUT_SCALE=30 VPHONE_RESTORE_BOOT_ARGS_EXTRA='-restore serial=3 -v' timeout --kill-after=15s 65m "$VC" restore -l "$ROOT/vms" gpu-recovery -v > "$LOG/restore.log" 2>&1 & restore_pid=$!
 echo "$restore_pid" > "$WORK/restore.pid"
+tail --pid="$restore_pid" -n +1 -F "$LOG/restore.log" & restore_log_pid=$!
 wait "$restore_pid"
+wait "$restore_log_pid"
+restore_log_pid=
 restore_pid=
 grep -q 'Restore Finished' "$LOG/restore.log"
+stage 'Restore finished; stop the VM and extract the GPU driver'
 kill -TERM "$guard_pid"; wait "$guard_pid" 2>/dev/null || true; guard_pid=
 stop_vm
 mkdir "$WORK/extracted"
 BUNDLE=Volume1/System/Library/Extensions/AppleParavirtGPUMetalIOGPUFamily.bundle
-"$WORK/7zip/7zz" x "$VM/Disk.img" -o"$WORK/extracted" "$BUNDLE" -r -y > "$LOG/7zip.log"
+"$WORK/7zip/7zz" x "$VM/Disk.img" -o"$WORK/extracted" "$BUNDLE" -r -y 2>&1 | tee "$LOG/7zip.log"
 [[ -f "$WORK/extracted/$BUNDLE/AppleParavirtGPUMetalIOGPUFamily" ]]
 tar -cf "$OUT/AppleParavirtGPUMetalIOGPUFamily.bundle.tar" -C "$WORK/extracted/Volume1/System/Library/Extensions" AppleParavirtGPUMetalIOGPUFamily.bundle
 (cd "$OUT"; sha256sum AppleParavirtGPUMetalIOGPUFamily.bundle.tar inputs.json > SHA256SUMS)
