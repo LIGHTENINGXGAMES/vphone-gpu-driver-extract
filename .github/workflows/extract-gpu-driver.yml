@@ -1,0 +1,40 @@
+name: Extract cloudOS GPU driver
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/extract-gpu-driver.yml
+      - tools/ci-extract-gpu-driver.sh
+      - tools/Package.resolved
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-driver-extract
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build CPU tools and extract the driver
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT,RUNNER_TEMP,GITHUB_WORKSPACE,GITHUB_RUN_ID,GITHUB_SHA bash tools/ci-extract-gpu-driver.sh
+      - name: Upload driver and bounded logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cloudOS-23E5207q-gpu-driver
+          retention-days: 3
+          if-no-files-found: error
+          path: |
+            artifacts/AppleParavirtGPUMetalIOGPUFamily.bundle.tar
+            artifacts/SHA256SUMS
+            artifacts/inputs.json
+            artifacts/logs/*.log
