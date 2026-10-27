@@ -248,11 +248,12 @@ PY
 rm -rf -- "$WORK/qemu-build" "$ROOT/linux-create/.build" "$WORK/swift.tar.gz"
 check_resources
 stage 'Start the temporary cloudOS VM and USB helpers'
+[[ -f "$ROOT/qemu/pc-bios/efi-virtio.rom" ]]
 systemctl stop usbmuxd.service 2>/dev/null || true
 [[ ! -e /var/run/usbmuxd ]]
 "$ROOT/.build/usbmuxd-32k/usbmuxd" -f -v -S /var/run/usbmuxd -P "$WORK/usbmuxd.pid" -l "$LOG/usbmuxd.log" & mux_pid=$!
 cd "$ROOT"
-CID=0 SMP=8 MEM=4G TB_SIZE=512 GFX=0 WINDOW=0 CI_SERIAL_LOG="$LOG/serial.log" LOG="$LOG/qemu.log" DFLAGS=guest_errors bash run-vphone.sh "$VM" -qmp "unix:$SOCK,server=on,wait=off" -chardev "socket,id=vusb,path=$WORK/vusb.sock,server=on,wait=off" -global vresearch-vusb.chardev=vusb > "$LOG/qemu-stdout.log" 2> "$LOG/qemu-stderr.log" & qemu_pid=$!
+CID=0 SMP=8 MEM=4G TB_SIZE=512 GFX=0 WINDOW=0 CI_SERIAL_LOG="$LOG/serial.log" LOG="$LOG/qemu.log" DFLAGS=guest_errors bash run-vphone.sh "$VM" -L "$ROOT/qemu/pc-bios" -qmp "unix:$SOCK,server=on,wait=off" -chardev "socket,id=vusb,path=$WORK/vusb.sock,server=on,wait=off" -global vresearch-vusb.chardev=vusb > "$LOG/qemu-stdout.log" 2> "$LOG/qemu-stderr.log" & qemu_pid=$!
 echo "$qemu_pid" > "$WORK/qemu.pid"
 (
     minimum=999999999
@@ -269,9 +270,22 @@ echo "$qemu_pid" > "$WORK/qemu.pid"
         sleep 2
     done
 ) & guard_pid=$!
-for _ in $(seq 1 30); do [[ ! -S "$WORK/vusb.sock" ]] || break; sleep 1; done
-[[ -S "$WORK/vusb.sock" ]]
-qmp query-status > "$LOG/qmp.log"
+ready=0
+for _ in $(seq 1 30); do
+    if ! kill -0 "$qemu_pid" 2>/dev/null; then
+        cat "$LOG/qemu-stderr.log"
+        exit 1
+    fi
+    if [[ -S "$WORK/vusb.sock" && -S "$SOCK" ]] && qmp query-status > "$LOG/qmp.log" 2>&1; then
+        ready=1
+        break
+    fi
+    sleep 1
+done
+if (( ! ready )); then
+    cat "$LOG/qemu-stderr.log" "$LOG/qmp.log"
+    exit 1
+fi
 sleep 20
 VUSB_URB_TIMEOUT=300 python3 -u tools/vusb-usbip.py "$WORK/vusb.sock" > "$LOG/usbip.log" 2>&1 & exporter_pid=$!
 bash tools/usbip-autoattach.sh > "$LOG/attach.log" 2>&1 & attacher_pid=$!
