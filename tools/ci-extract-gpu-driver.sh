@@ -19,13 +19,15 @@ VPHONE=f839de562aac9ebeb6b2f922ff0e54fc28d1f8fc
 CLI=a9e42c2c31d4d76b4cfe398b7bec9b5cbb3f0ff9
 QEMU_REF=3ed85774c2989addec3056a866991762b60c4b5c
 USBMUXD_REF=3ded00c9985a5108cfc7591a309f9a23d57a8cba
+NETTLE_URL=https://ftp.gnu.org/gnu/nettle/nettle-3.10.2.tar.gz
+NETTLE_SHA=fe9ff51cb1f2abb5e65a6b8c10a92da0ab5ab6eaf26e7fc2b675c45f1fb519b5
 CLOUD_SHA=c0ecdb4b310cf5239ab2b248dd3098eec297dc5aa3bbe6ada27273262b0b8b64
 CLOUD_URL=https://updates.cdn-apple.com/private-cloud-compute/$CLOUD_SHA
 SWIFT_URL=https://download.swift.org/swift-6.4.1-release/ubuntu2204/swift-6.4.1-RELEASE/swift-6.4.1-RELEASE-ubuntu22.04.tar.gz
 SWIFT_SHA=e9ec2ff05ac0fc89bf2e7cecdee5da4d398898a768d7ee2b86a59d2a7f01c44b
 SEVEN_URL=https://github.com/ip7z/7zip/releases/download/26.05/7z2605-linux-x64.tar.xz
 SEVEN_SHA=22cf82fcc6eb7474f1d5bb4f02c0f8ebd573a718089d6833dc30f8350a3b232e
-export WORK OUT PREFIX VPHONE CLI QEMU_REF USBMUXD_REF CLOUD_SHA CLOUD_URL SWIFT_URL SWIFT_SHA SEVEN_URL SEVEN_SHA
+export WORK OUT PREFIX VPHONE CLI QEMU_REF USBMUXD_REF NETTLE_URL NETTLE_SHA CLOUD_SHA CLOUD_URL SWIFT_URL SWIFT_SHA SEVEN_URL SEVEN_SHA
 export DEBIAN_FRONTEND=noninteractive
 export http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= all_proxy= NO_PROXY='*'
 qemu_pid= mux_pid= exporter_pid= attacher_pid= restore_pid= restore_log_pid= guard_pid=
@@ -34,7 +36,7 @@ VM="$ROOT/vms/gpu-recovery"
 SOCK="$WORK/qmp.sock"
 python3 - <<'PY' > "$OUT/inputs.json"
 import json,os
-keys=['VPHONE','CLI','QEMU_REF','USBMUXD_REF','CLOUD_URL','CLOUD_SHA','SWIFT_URL','SWIFT_SHA','SEVEN_URL','SEVEN_SHA','GITHUB_RUN_ID','GITHUB_SHA']
+keys=['VPHONE','CLI','QEMU_REF','USBMUXD_REF','NETTLE_URL','NETTLE_SHA','CLOUD_URL','CLOUD_SHA','SWIFT_URL','SWIFT_SHA','SEVEN_URL','SEVEN_SHA','GITHUB_RUN_ID','GITHUB_SHA']
 print(json.dumps({k:os.environ[k] for k in keys},indent=2))
 PY
 
@@ -116,7 +118,8 @@ check_resources() {
 stage 'Free space on the disposable runner and install build dependencies'
 rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache
 apt-get update -qq 2>&1 | tee "$LOG/apt.log"
-apt-get install -y --no-install-recommends build-essential clang cmake ninja-build pkg-config autoconf automake libtool git curl xz-utils unzip python3-venv libglib2.0-dev libpixman-1-dev libfdt-dev libusb-1.0-0-dev libusbmuxd-dev libarchive-dev libssl-dev libcurl4-openssl-dev zlib1g-dev libbz2-dev liblzma-dev libxml2-dev libicu-dev libblocksruntime-dev libncurses-dev libedit-dev libsqlite3-dev linux-tools-generic 2>&1 | tee -a "$LOG/apt.log"
+apt-get install -y --no-install-recommends build-essential clang cmake ninja-build pkg-config autoconf automake libtool git curl xz-utils unzip python3-venv libglib2.0-dev libpixman-1-dev libfdt-dev libusb-1.0-0-dev libusbmuxd-dev libarchive-dev libssl-dev libcurl4-openssl-dev zlib1g-dev libbz2-dev liblzma-dev libxml2-dev libicu-dev libblocksruntime-dev libncurses-dev libedit-dev libsqlite3-dev libtasn1-6-dev libgmp-dev linux-tools-generic 2>&1 | tee -a "$LOG/apt.log"
+pkg-config --print-errors --exists libtasn1
 stage 'Check USB/IP kernel modules'
 if ! modprobe usbip_core || ! modprobe vhci_hcd; then
     stage "Install missing USB/IP modules for kernel $(uname -r)"
@@ -152,6 +155,13 @@ export PATH="$WORK/python/bin:$PATH"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
 export LD_LIBRARY_PATH="$PREFIX/lib:$WORK/swift/usr/lib/swift/linux"
 export C_INCLUDE_PATH="$PREFIX/include" LIBRARY_PATH="$PREFIX/lib"
+
+stage 'Build pinned Nettle for the guest AES device'
+fetch "$NETTLE_URL" "$WORK/nettle.tar.gz" "$NETTLE_SHA"
+mkdir "$WORK/nettle" "$WORK/nettle-build"
+tar -xzf "$WORK/nettle.tar.gz" -C "$WORK/nettle" --strip-components=1
+(cd "$WORK/nettle-build"; "$WORK/nettle/configure" --prefix="$PREFIX" --libdir="$PREFIX/lib" --disable-documentation --disable-static --enable-shared; make -j2; make install) 2>&1 | tee "$LOG/nettle.log"
+pkg-config --atleast-version=3.10 nettle
 
 clone https://github.com/lzfse/lzfse.git e634ca58b4821d9f3d560cdc6df5dec02ffc93fd "$WORK/lzfse"
 stage 'Build and install LZFSE'
@@ -204,7 +214,8 @@ replace(r/'linux-create/edits/MobileRestoreCore.txt', "# Scale idevicerestore's 
 PY
 mkdir "$WORK/qemu-build"
 stage 'Configure and build CPU-only QEMU'
-(cd "$WORK/qemu-build"; "$ROOT/qemu/configure" --python="$WORK/python/bin/python" --target-list=aarch64-softmmu --with-devices-aarch64=vphone --without-default-devices --without-default-features --enable-tcg --enable-lzfse --enable-pixman --enable-fdt=system --disable-pvg --disable-tools --disable-werror; ninja -j2 qemu-system-aarch64) 2>&1 | tee "$LOG/qemu-build.log"
+(cd "$WORK/qemu-build"; "$ROOT/qemu/configure" --python="$WORK/python/bin/python" --target-list=aarch64-softmmu --with-devices-aarch64=vphone --without-default-devices --without-default-features --enable-tcg --enable-lzfse --enable-pixman --enable-fdt=system --enable-nettle --disable-pvg --disable-tools --disable-werror; ninja -j2 qemu-system-aarch64) 2>&1 | tee "$LOG/qemu-build.log"
+grep -Eq '^#define CONFIG_NETTLE([[:space:]]+1)?[[:space:]]*$' "$WORK/qemu-build/config-host.h"
 cp "$WORK/qemu-build/qemu-system-aarch64" "$PREFIX/bin/"
 export QEMU="$PREFIX/bin/qemu-system-aarch64"
 cp "$GITHUB_WORKSPACE/tools/Package.resolved" "$ROOT/linux-create/Package.resolved"
