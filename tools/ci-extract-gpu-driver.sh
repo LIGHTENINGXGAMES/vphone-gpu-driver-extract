@@ -220,7 +220,7 @@ cp "$WORK/qemu-build/qemu-system-aarch64" "$PREFIX/bin/"
 export QEMU="$PREFIX/bin/qemu-system-aarch64"
 cp "$GITHUB_WORKSPACE/tools/Package.resolved" "$ROOT/linux-create/Package.resolved"
 stage 'Build the pinned Linux firmware CLI with Swift'
-(cd "$ROOT/linux-create"; VPHONE_CLI="$WORK/vphone-cli" bash sync-sources.sh; rm Shims/libarchive/lib/libarchive.so; ln -s /usr/lib/x86_64-linux-gnu/libarchive.so.13 Shims/libarchive/lib/libarchive.so; swift build -c release -j2 --force-resolved-versions --build-system swiftbuild --scratch-path .build/out -Xcc "-I$PREFIX/include" -Xlinker "-L$PREFIX/lib") 2>&1 | tee "$LOG/swift-build.log"
+(cd "$ROOT/linux-create"; VPHONE_CLI="$WORK/vphone-cli" bash sync-sources.sh; rm Shims/libarchive/lib/libarchive.so; ln -s /usr/lib/x86_64-linux-gnu/libarchive.so.13 Shims/libarchive/lib/libarchive.so; swift build -c release -j 2 --force-resolved-versions --build-system swiftbuild --scratch-path .build/out -Xcc "-I$PREFIX/include" -Xlinker "-L$PREFIX/lib") 2>&1 | tee "$LOG/swift-build.log"
 cp "$ROOT/linux-create/.build/out/out/Products/Release-linux-x86_64/vphone-cli" "$PREFIX/bin/"
 VC="$PREFIX/bin/vphone-cli"
 clone https://github.com/libimobiledevice/usbmuxd.git "$USBMUXD_REF" "$ROOT/.build/usbmuxd-32k/src"
